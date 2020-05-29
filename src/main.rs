@@ -1,9 +1,10 @@
+use log::debug;
 use reqwest::Client;
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, Value};
 use std::{collections::HashMap, convert::Infallible, env, fmt, process, sync::Arc};
 use tokio::fs;
-use warp::{Filter, Rejection, Reply};
+use warp::{http::StatusCode, Filter, Rejection, Reply};
 
 type JsonObject = serde_json::Map<String, JsonValue>;
 type JsonArray = Vec<JsonValue>;
@@ -171,7 +172,12 @@ enum JsonPathSegment {
 
 #[tokio::main]
 async fn main() {
-    let config_path = match env::args().nth(2) {
+    if env::var("FORWARDHOOK_LOG").is_err() {
+        env::set_var("FORWARDHOOK_LOG", "INFO");
+    }
+    env_logger::init_from_env("FORWARDHOOK_LOG");
+
+    let config_path = match env::args().nth(1) {
         Some(s) => s,
         None => "forwardhook.json".to_owned(),
     };
@@ -181,6 +187,10 @@ async fn main() {
     let config: Config =
         serde_json::from_str(&config_contents).unwrap_or_exit("Invalid config file", 66);
     let port = config.port;
+
+    for id in config.webhooks.keys() {
+        debug!("/{}", id);
+    }
 
     let client = Client::builder()
         .user_agent(
@@ -197,10 +207,12 @@ async fn main() {
         .and(warp::body::json())
         .and(inject(Arc::new(config)))
         .and(inject(Arc::new(client)))
-        .and_then(handler);
+        .and_then(handler)
+        .or(warp::any().map(|| warp::reply::with_status("Not Found", StatusCode::NOT_FOUND)));
 
-    println!("Listening on port {}", port);
-    warp::serve(filter).run(([127, 0, 0, 1], port)).await;
+    warp::serve(filter.with(warp::log("forwardhook")))
+        .run(([127, 0, 0, 1], port))
+        .await;
 }
 
 async fn handler(
